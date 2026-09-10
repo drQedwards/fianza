@@ -5,7 +5,7 @@
 // answering questions, but a good answer needs a paid premium-data call it may
 // not be able to afford right now. When it's short, it reasons and draws
 // Fianza credit (working capital), buys the data, answers, and repays from
-// what it earns. Every money-move is a real testnet transaction.
+// what it earns. Every money-move is a real on-chain transaction (testnet by default; set STELLAR_NETWORK=mainnet for the live Circle USDC vault).
 //
 // This is spend-to-earn / working capital — NOT speculation. The agent never
 // borrows to trade or gamble; it borrows to buy an input for profitable work,
@@ -50,24 +50,97 @@ const RESEARCH_PRICE = Number(process.env.DEMO_RESEARCH_PRICE_USDC || 0.3);
 // repay with. On mainnet this is a real buyer paying over x402; on testnet the
 // holding wallet stands in for that customer (labeled honestly in the UI).
 const JOB_PAYOUT = Number(process.env.DEMO_JOB_PAYOUT_USDC || 0.5);
-const EXPLORER = (h) => `https://stellar.expert/explorer/testnet/tx/${h}`;
 
-const USDC = new Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
-const horizon = new Horizon.Server("https://horizon-testnet.stellar.org");
+// Default stays testnet so existing Render services do not flip to real USDC.
+// Set STELLAR_NETWORK=mainnet (or NETWORK=mainnet) to drive the already-live
+// mainnet contracts via /mainnet/* on the backend.
+const NETWORK = String(process.env.STELLAR_NETWORK || process.env.NETWORK || "testnet").toLowerCase();
+const IS_MAINNET = NETWORK === "mainnet" || NETWORK === "pubnet";
+const EXPLORER = (h) =>
+  `https://stellar.expert/explorer/${IS_MAINNET ? "public" : "testnet"}/tx/${h}`;
+const NETWORK_PASSPHRASE = IS_MAINNET ? Networks.PUBLIC : Networks.TESTNET;
+const USDC = new Asset(
+  "USDC",
+  IS_MAINNET
+    ? "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    : "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+);
+const horizon = new Horizon.Server(
+  IS_MAINNET ? "https://horizon.stellar.org" : "https://horizon-testnet.stellar.org",
+);
 // The stand-in customer wallet (also our demo holding wallet).
 const customer = process.env.DEMO_HOLDING_SECRET
   ? Keypair.fromSecret(process.env.DEMO_HOLDING_SECRET)
   : null;
 
-// The demo agent is the ANALYST wallet: it has REAL on-chain revenue ($2.96
-// from 5 independent payers → Tier C, ~$0.44 limit), and we've swept its spare
-// cash to a holding wallet so it's short and MUST draw credit for the $0.3 data
-// call. Override with DEMO_AGENT_SECRET if you want a different agent.
-const AGENT_SECRET = process.env.DEMO_AGENT_SECRET_OVERRIDE || process.env.ANALYST_WALLET_SECRET;
-if (!AGENT_SECRET)
-  throw new Error("ANALYST_WALLET_SECRET missing in agents/.env (demo agent)");
+// Testnet demo agent is the ANALYST wallet. Mainnet uses MAINNET_AGENT_SECRET
+// (must match the backend key that signs /mainnet/agent/borrow|repay).
+const AGENT_SECRET = IS_MAINNET
+  ? process.env.MAINNET_AGENT_SECRET ||
+    process.env.DEMO_AGENT_SECRET_OVERRIDE ||
+    process.env.ANALYST_WALLET_SECRET
+  : process.env.DEMO_AGENT_SECRET_OVERRIDE || process.env.ANALYST_WALLET_SECRET;
+if (!AGENT_SECRET) {
+  throw new Error(
+    IS_MAINNET
+      ? "MAINNET_AGENT_SECRET missing (demo mainnet agent)"
+      : "ANALYST_WALLET_SECRET missing in agents/.env (demo agent)",
+  );
+}
 
-const tl = new TrustLineAgent(AGENT_SECRET, { apiBaseUrl: TRUSTLINE_API });
+const MAINNET_RPC =
+  process.env.MAINNET_RPC_URL || "https://mainnet.sorobanrpc.com";
+const tl = new TrustLineAgent(
+  AGENT_SECRET,
+  IS_MAINNET
+    ? {
+        apiBaseUrl: TRUSTLINE_API,
+        rpcUrl: MAINNET_RPC,
+        networkPassphrase: NETWORK_PASSPHRASE,
+        contracts: {
+          registry: "CAHWYFLMQI6BBOL6ZLZRRINCK6KVBX73ACH7LCPB24WDED4LSMCI7YZC",
+          creditLine: "CDK7S4UWY227FHFKDSV37DGT7AIJ5Z2QEYO5AY456M7RBGJN25WYJVGC",
+          vault: "CAE5C5UJYVED5DAVY4YKYT6E2C4NBZCIUBAK2MXGKGLKZESBBXKFPZ4U",
+        },
+      }
+    : { apiBaseUrl: TRUSTLINE_API },
+);
+
+async function classicUsdcBalance(address) {
+  const acct = await horizon.loadAccount(address);
+  const row = acct.balances.find(
+    (b) => b.asset_code === "USDC" && b.asset_issuer === USDC.issuer,
+  );
+  return row ? Number(row.balance) : 0;
+}
+
+async function mainnetCredit() {
+  const r = await fetch(`${TRUSTLINE_API}/mainnet/agent/${tl.publicKey()}/credit`);
+  if (!r.ok) throw new Error(`mainnet credit ${r.status}`);
+  return r.json();
+}
+
+async function mainnetBorrowApi(amountUsdc) {
+  const r = await fetch(`${TRUSTLINE_API}/mainnet/agent/borrow`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ amountUsdc }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `mainnet borrow ${r.status}`);
+  return body;
+}
+
+async function mainnetRepayApi(amountUsdc) {
+  const r = await fetch(`${TRUSTLINE_API}/mainnet/agent/repay`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ amountUsdc }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `mainnet repay ${r.status}`);
+  return body;
+}
 
 const SYSTEM = `You are Scout, an autonomous market-research agent with your own Stellar wallet and a Fianza credit line.
 
@@ -147,6 +220,24 @@ const tools = [
 // ---- Tool implementations (real SDK / testnet) ----
 
 async function checkCredit() {
+  if (IS_MAINNET) {
+    const [balance, live] = await Promise.all([
+      classicUsdcBalance(tl.publicKey()),
+      mainnetCredit(),
+    ]);
+    return {
+      network: "mainnet",
+      balanceUsdc: round(balance),
+      availableCreditUsdc: round(live?.vault?.availableCreditUsdc ?? 0),
+      tier: live?.tier ?? null,
+      publishedLimitUsdc: live ? round(Number(live.limitUsdc)) : null,
+      rampedLimitUsdc: null,
+      aprBps: live?.aprBps ?? null,
+      revenueUsdc: null,
+      distinctPayers: null,
+      amountOwedUsdc: live?.vault ? round(Number(live.vault.amountOwedUsdc)) : null,
+    };
+  }
   const [balance, live] = await Promise.all([
     tl.usdcBalanceUsdc(),
     // Live underwrite read from the backend (real numbers, not stale on-chain).
@@ -162,6 +253,7 @@ async function checkCredit() {
     /* vault may not be underwritten yet */
   }
   return {
+    network: "testnet",
     balanceUsdc: round(balance),
     availableCreditUsdc: round(availableOnChain),
     tier: live?.tier ?? null,
@@ -174,21 +266,30 @@ async function checkCredit() {
 }
 
 async function buyPremiumData({ topic }) {
-  const balBefore = await tl.usdcBalanceUsdc();
+  const balBefore = IS_MAINNET
+    ? await classicUsdcBalance(tl.publicKey())
+    : await tl.usdcBalanceUsdc();
   const shortfall = Math.max(0, RESEARCH_PRICE - balBefore);
 
   // If short, borrow the shortfall EXPLICITLY first so we capture the on-chain
   // borrow tx hash for the UI's clickable proof link (payWithCredit borrows
-  // internally but only returns the paid Response, not the tx). borrow() now
-  // auto-seeds the vault via the treasury (testnet lender-of-first-resort).
-  // Borrowing first raises the balance, so payWithCredit sees no shortfall and
-  // does NOT double-borrow — it just settles the x402 payment.
+  // internally but only returns the paid Response, not the tx). On testnet,
+  // borrow() auto-seeds the vault via the treasury. On mainnet, borrow goes
+  // through /mainnet/agent/borrow against the live vault (real Circle USDC).
   let borrowTx;
   if (shortfall > 0) {
-    const b = await tl.borrow(round(shortfall));
-    borrowTx = b.txHash;
+    if (IS_MAINNET) {
+      const b = await mainnetBorrowApi(round(shortfall));
+      borrowTx = b.txHash || b.hash;
+    } else {
+      const b = await tl.borrow(round(shortfall));
+      borrowTx = b.txHash;
+    }
   }
 
+  // Mainnet research sellers must also settle in mainnet USDC. If the configured
+  // RESEARCH_URL is still a testnet x402 host, payWithCredit will fail — keep
+  // DEMO_RESEARCH_URL pointed at a mainnet-capable seller when NETWORK=mainnet.
   const res = await tl.payWithCredit(RESEARCH_URL, RESEARCH_PRICE, {
     init: {
       method: "POST",
@@ -200,6 +301,7 @@ async function buyPremiumData({ topic }) {
 
   return {
     ok: res.ok,
+    network: IS_MAINNET ? "mainnet" : "testnet",
     topic,
     pricePaidUsdc: RESEARCH_PRICE,
     drewCredit: shortfall > 0,
@@ -224,7 +326,9 @@ async function repay({ amountUsdc }) {
   // You can only repay with cash you actually hold. Cap the repayment at the
   // spendable balance (leaving a tiny dust buffer) so the agent never tries to
   // transfer USDC it doesn't have (which fails on-chain with a balance error).
-  const bal = await tl.usdcBalanceUsdc();
+  const bal = IS_MAINNET
+    ? await classicUsdcBalance(tl.publicKey())
+    : await tl.usdcBalanceUsdc();
   const spendable = Math.max(0, round(bal - 0.001));
   if (spendable <= 0) {
     return {
@@ -235,8 +339,19 @@ async function repay({ amountUsdc }) {
     };
   }
   if (amt > spendable) amt = spendable;
+  if (IS_MAINNET) {
+    const r = await mainnetRepayApi(amt);
+    const txHash = r.txHash || r.hash;
+    return {
+      repaid: true,
+      network: "mainnet",
+      repaidUsdc: round(amt),
+      txHash,
+      explorerUrl: EXPLORER(txHash),
+    };
+  }
   const r = await tl.repay(amt);
-  return { repaid: true, repaidUsdc: round(amt), txHash: r.txHash, explorerUrl: EXPLORER(r.txHash) };
+  return { repaid: true, network: "testnet", repaidUsdc: round(amt), txHash: r.txHash, explorerUrl: EXPLORER(r.txHash) };
 }
 
 // Customer pays the agent for the finished research — the job's revenue.
@@ -250,7 +365,7 @@ async function deliverAndGetPaid() {
   const acct = await horizon.loadAccount(customer.publicKey());
   const tx = new TransactionBuilder(acct, {
     fee: BASE_FEE,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(
       Operation.payment({
@@ -295,7 +410,9 @@ const START_CASH = Number(process.env.DEMO_START_CASH_USDC || 0.05);
  */
 export async function drainAgentCash() {
   if (!customer) return { drained: false, reason: "no customer wallet configured" };
-  const bal = await tl.usdcBalanceUsdc();
+  const bal = IS_MAINNET
+    ? await classicUsdcBalance(tl.publicKey())
+    : await tl.usdcBalanceUsdc();
   const excess = round(bal - START_CASH);
   if (excess <= 0.001) {
     return { drained: false, reason: "already cash-poor", balanceUsdc: round(bal) };
@@ -303,7 +420,7 @@ export async function drainAgentCash() {
   const acct = await horizon.loadAccount(tl.publicKey());
   const tx = new TransactionBuilder(acct, {
     fee: BASE_FEE,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(
       Operation.payment({
@@ -342,6 +459,7 @@ export async function runScout(userRequest, onEvent) {
 
 export const agentInfo = {
   address: tl.publicKey(),
+  network: IS_MAINNET ? "mainnet" : "testnet",
   researchUrl: RESEARCH_URL,
   researchPriceUsdc: RESEARCH_PRICE,
   trustlineApi: TRUSTLINE_API,
