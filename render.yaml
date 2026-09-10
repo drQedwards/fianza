@@ -105,3 +105,39 @@ services:
         value: https://fianza-5m68.onrender.com
       - key: REVIEWER_PRICE_USDC
         value: "0.3"
+
+  # Optional mainnet demo agent. Does NOT replace testnet services.
+  # Requires MAINNET_AGENT_SECRET to match the backend key that signs
+  # /mainnet/agent/borrow|repay. Spends real Circle USDC.
+  - type: web
+    name: fianza-agent-mainnet
+    runtime: node
+    rootDir: agents
+    buildCommand: npm install && (cd ../packages/agent-sdk && npm install && npm run build)
+    startCommand: node demo/agent-server.mjs
+    envVars:
+      - key: STELLAR_NETWORK
+        value: mainnet
+      - key: TRUSTLINE_API
+        value: https://fianza-5m68.onrender.com
+      - key: MAINNET_AGENT_SECRET
+        sync: false
+      - key: MAINNET_RPC_URL
+        sync: false
+      - key: DEMO_HOLDING_SECRET
+        sync: false
+      - key: DEMO_RESEARCH_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OZ_API_KEY
+        sync: false
+      - key: FACILITATOR_URL
+        value: https://channels.openzeppelin.com/x402
+      - key: DEMO_RESEARCH_PRICE_USDC
+        value: "0.3"
+      - key: DEMO_JOB_PAYOUT_USDC
+        value: "0.5"
+
