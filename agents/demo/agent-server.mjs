@@ -33,6 +33,7 @@ app.use((req, res, next) => {
 app.get("/info", (_req, res) => {
   res.json({
     agent: agentInfo.address,
+    network: agentInfo.network || "testnet",
     researchPriceUsdc: agentInfo.researchPriceUsdc,
     trustlineApi: agentInfo.trustlineApi,
     llm: {
